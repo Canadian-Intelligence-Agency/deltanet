@@ -20,8 +20,8 @@
 
     <div class="max-w-4xl mx-auto space-y-6">
         <header class="text-center py-4 border-b border-indigo-500/50">
-            <h1 class="text-3xl font-extrabold text-indigo-400">δ.net: Basic Protocol Stream</h1>
-            <p class="text-sm text-gray-400 mt-1">Visualizing simulated 10 Hz Alpha wave data from the Go API.</p>
+            <h1 class="text-3xl font-extrabold text-indigo-400">δ.net: Multi-Channel Protocol Stream</h1>
+            <p class="text-sm text-gray-400 mt-1">Visualizing simulated 10 Hz Alpha, 4 Hz Theta, and Gamma wave data from the Go API.</p>
         </header>
 
         <!-- Status and Metrics Panel -->
@@ -29,9 +29,10 @@
             <div>
                 <span class="text-green-400 font-bold" id="status-display">STATUS: Connecting...</span>
             </div>
-            <div class="space-x-4">
+            <div class="space-x-4 flex items-center">
+                <span id="channel-count-display" class="text-gray-400 bg-gray-700 px-2 py-1 rounded-md">Channels: 0</span>
                 <span id="ts-display" class="text-gray-400">TS: 0 ms</span>
-                <span id="freq-display" class="text-gray-400">Freq: 250 SPS</span>
+                <span id="freq-display" class="text-yellow-400 font-mono">SPS: 0</span>
                 <span id="latency-display" class="text-gray-400">Latency: 0 ms</span>
             </div>
         </div>
@@ -41,27 +42,48 @@
             <canvas id="signalCanvas"></canvas>
         </div>
 
-        <!-- Configuration Panel (Placeholder for future controls) -->
+        <!-- Channel Status Panel -->
         <div class="bg-gray-800 p-4 rounded-xl shadow-lg">
-            <h3 class="text-lg font-semibold text-gray-300">Channel 1: Fp1 (Simulated)</h3>
-            <p class="text-xs text-gray-500 mt-1">Simulated voltage range: 0 $\mu\text{V}$ to $100\text{\mu\text{V}}$. Core frequency: $10\text{Hz}$ Alpha.</p>
+            <h3 class="text-lg font-semibold text-gray-300 mb-2">Active Channels ($\mu\text{V}$ Scale 0-120)</h3>
+            <div id="channel-status-list" class="flex flex-wrap gap-4 text-xs">
+                <!-- Channel indicators will be injected here -->
+            </div>
         </div>
     </div>
 
     <script>
         // --- Configuration ---
-        const API_URL = "http://localhost:8080/api/v1/signal";
+        const API_URL = "http://localhost:8080/api/v1/signal"; // Assuming Go server will now return multi-channel data
         // Interval for fetching new data (simulating a stream)
         const FETCH_INTERVAL_MS = 200; 
         // Number of data points to display in the window (e.g., 5 seconds at 250 SPS)
         const DISPLAY_POINTS = 1250; 
         
+        // Fixed voltage range for visualization consistency
+        const V_MIN = 0; 
+        const V_MAX = 120; // Set slightly above the 100 µV max for padding
+        const V_RANGE = V_MAX - V_MIN;
+        
+        // Channel Visualization Mapping
+        const CHANNEL_COLORS = {
+            "Fp1": '#6366f1', // Indigo (Alpha, Frontal)
+            "O1": '#22c55e',  // Green (Theta/Visual, Occipital)
+            "T3": '#f97316',  // Orange (Gamma/High Freq, Temporal)
+        };
+        const MAX_CHANNELS = 3; // Max channels to visualize
+
         // --- State Variables ---
-        let signalBuffer = []; // Stores all recent points for plotting
-        let lastFetchTime = 0; // Tracks performance
-        let statusDisplay = document.getElementById('status-display');
-        let tsDisplay = document.getElementById('ts-display');
-        let latencyDisplay = document.getElementById('latency-display');
+        // Stores data: { "Fp1": [{t:..., v:...}, ...], "O1": [...] }
+        let channelBuffers = {}; 
+        let lastTimestamp = 0; // For SPS calculation
+        
+        // DOM Elements
+        const statusDisplay = document.getElementById('status-display');
+        const tsDisplay = document.getElementById('ts-display');
+        const freqDisplay = document.getElementById('freq-display');
+        const latencyDisplay = document.getElementById('latency-display');
+        const channelCountDisplay = document.getElementById('channel-count-display');
+        const channelStatusList = document.getElementById('channel-status-list');
         
         // --- Canvas Setup ---
         const canvas = document.getElementById('signalCanvas');
@@ -110,29 +132,119 @@
             }
         };
 
+        /**
+         * Calculates the Samples Per Second (SPS) based on the latest data packet.
+         * Assumes the first channel in the buffer is representative.
+         */
+        function calculateSPS(channelData) {
+            if (Object.keys(channelData).length === 0) return 0;
+            
+            // Get the data points from the first channel
+            const firstChannelId = Object.keys(channelData)[0];
+            const points = channelData[firstChannelId];
+
+            if (points.length < 2) return 0;
+
+            const latestPoints = points.slice(-50); // Use the last 50 points for reliable calculation
+            const startTime = latestPoints[0].t;
+            const endTime = latestPoints[latestPoints.length - 1].t;
+            const timeDeltaMs = endTime - startTime;
+            
+            if (timeDeltaMs <= 0) return 0;
+            
+            const numSamples = latestPoints.length;
+            const sps = (numSamples * 1000) / timeDeltaMs;
+            
+            return Math.round(sps);
+        }
+        
+        /**
+         * Processes incoming multi-channel data and updates buffers.
+         * Note: The Go server needs to be updated to return this structure.
+         * Expected format: [{ channelId: "Fp1", points: [{t:..., v:...}, ...] }, ...]
+         */
         async function fetchSignalData() {
             try {
-                const newPoints = await fetchWithRetry(API_URL);
+                // Fetch the new data array (expected multi-channel payload)
+                // If the Go server is still returning a single array of points, 
+                // this code will wrap it into a simulated multi-channel format for plotting.
+                let receivedData = await fetchWithRetry(API_URL);
+                
+                // --- Multi-Channel Adaptation/Simulation ---
+                let processedChannels = {};
+                
+                if (!Array.isArray(receivedData) || receivedData.length === 0) {
+                    throw new Error("Invalid data format received.");
+                }
+
+                if (receivedData[0].channelId === undefined) {
+                    // Simulate multi-channel data if the Go server returns only one channel (legacy)
+                    const simulatedPoints = receivedData; 
+                    
+                    // For visualization testing, we'll create simulated data for O1 and T3 based on Fp1
+                    const generateSimulatedChannel = (basePoints, offsetFactor, noiseFactor) => {
+                        return basePoints.map(p => ({
+                            t: p.t,
+                            // Apply a voltage offset and different noise/amplitude profile
+                            v: Math.max(0, p.v + offsetFactor + (Math.random() * noiseFactor)) 
+                        }));
+                    };
+
+                    processedChannels["Fp1"] = simulatedPoints;
+                    processedChannels["O1"] = generateSimulatedChannel(simulatedPoints, -10, 5);
+                    processedChannels["T3"] = generateSimulatedChannel(simulatedPoints, 20, 15);
+
+                } else {
+                    // Use the true multi-channel data structure from the updated Go server
+                    receivedData.forEach(channel => {
+                        if (CHANNEL_COLORS[channel.channelId]) {
+                             processedChannels[channel.channelId] = channel.points;
+                        }
+                    });
+                }
+                
+                if (Object.keys(processedChannels).length === 0) {
+                     throw new Error("No recognized channel data found.");
+                }
+                
                 statusDisplay.classList.remove('text-red-400', 'text-yellow-400');
                 statusDisplay.classList.add('text-green-400');
                 statusDisplay.textContent = 'STATUS: Streaming';
 
-                if (newPoints && newPoints.length > 0) {
-                    // 1. Append new data to the buffer
-                    signalBuffer.push(...newPoints);
-
-                    // 2. Trim the buffer to maintain the display window size
-                    if (signalBuffer.length > DISPLAY_POINTS) {
-                        signalBuffer = signalBuffer.slice(signalBuffer.length - DISPLAY_POINTS);
+                let latestTS = 0;
+                let channelCount = 0;
+                
+                for (const channelId in processedChannels) {
+                    const newPoints = processedChannels[channelId];
+                    
+                    if (!channelBuffers[channelId]) {
+                        channelBuffers[channelId] = [];
                     }
                     
-                    // 3. Update the latest timestamp display
-                    const latestTS = signalBuffer[signalBuffer.length - 1].Timestamp;
-                    tsDisplay.textContent = `TS: ${latestTS} ms`;
+                    // 1. Append new data
+                    channelBuffers[channelId].push(...newPoints);
 
-                    // 4. Trigger drawing
-                    drawSignal();
+                    // 2. Trim the buffer
+                    if (channelBuffers[channelId].length > DISPLAY_POINTS) {
+                        channelBuffers[channelId] = channelBuffers[channelId].slice(channelBuffers[channelId].length - DISPLAY_POINTS);
+                    }
+                    
+                    // 3. Track latest timestamp
+                    if (newPoints.length > 0) {
+                        latestTS = Math.max(latestTS, newPoints[newPoints.length - 1].t);
+                        channelCount++;
+                    }
                 }
+                
+                // 4. Update Metrics
+                const calculatedSPS = calculateSPS(channelBuffers);
+                freqDisplay.textContent = `SPS: ${calculatedSPS}`;
+                tsDisplay.textContent = `TS: ${latestTS} ms`;
+                channelCountDisplay.textContent = `Channels: ${channelCount}`;
+
+                // 5. Trigger drawing
+                drawSignal();
+
             } catch (error) {
                 console.error("Critical API error:", error);
                 statusDisplay.classList.remove('text-green-400');
@@ -152,62 +264,91 @@
             // Clear the canvas
             ctx.clearRect(0, 0, width, height);
             
-            // Draw background (already set via CSS, but good practice to clear)
+            // Draw background
             ctx.fillStyle = '#1e293b';
             ctx.fillRect(0, 0, width, height);
             
-            if (signalBuffer.length === 0) return;
+            const activeChannels = Object.keys(channelBuffers).filter(id => channelBuffers[id].length > 0);
+            if (activeChannels.length === 0) return;
 
-            // --- Normalization ---
-            
-            // Find max/min voltage in the current buffer to scale the plot
-            // Simulated range is 0 to 100 µV + noise, so we fix the scale for stability
-            const V_MIN = 0; 
-            const V_MAX = 120; // Set slightly above the 100 µV max for padding
-            const V_RANGE = V_MAX - V_MIN;
-
-            ctx.beginPath();
-            ctx.strokeStyle = '#6366f1'; // Indigo-500
-            ctx.lineWidth = 2;
-            
-            // Calculate pixel position for a given voltage
-            const getCanvasY = (voltage) => {
-                // Normalize voltage (0 to 1)
-                const normalizedV = (voltage - V_MIN) / V_RANGE; 
-                // Invert Y (canvas origin is top-left) and scale to height
-                return height * (1 - normalizedV); 
-            }
-
-            // Draw the line graph
-            signalBuffer.forEach((point, index) => {
-                const x = (index / (DISPLAY_POINTS - 1)) * width;
-                const y = getCanvasY(point.Voltage);
-
-                if (index === 0) {
-                    ctx.moveTo(x, y);
-                } else {
-                    ctx.lineTo(x, y);
-                }
-            });
-
-            ctx.stroke();
-
-            // --- Draw Center Line (Baseline) ---
-            const baselineY = getCanvasY(V_RANGE / 2 + V_MIN); // Center of 0 to 120 is 60
-            ctx.strokeStyle = '#475569'; // Slate-600
-            ctx.lineWidth = 1;
-            ctx.setLineDash([5, 5]);
-            ctx.beginPath();
-            ctx.moveTo(0, baselineY);
-            ctx.lineTo(width, baselineY);
-            ctx.stroke();
-            ctx.setLineDash([]); // Reset line dash
+            // Calculate vertical segment height for each channel
+            const segmentHeight = height / activeChannels.length;
             
             // Draw axes text
             ctx.fillStyle = '#94a3b8'; // Slate-400
             ctx.font = '12px Inter, sans-serif';
-            ctx.fillText(`${V_MAX} µV`, 5, 15);
+            ctx.fillText(`Scale: ${V_MAX} µV`, 5, 15);
             ctx.fillText(`${V_MIN} µV`, 5, height - 5);
+            
+            let channelIndex = 0;
+
+            // Update channel status list HTML
+            channelStatusList.innerHTML = activeChannels.map(channelId => 
+                `<span class="px-2 py-1 rounded-full" style="background-color: ${CHANNEL_COLORS[channelId]}; color: #1e293b; font-weight: bold;">${channelId}</span>`
+            ).join('');
+
+            
+            activeChannels.forEach((channelId) => {
+                const buffer = channelBuffers[channelId];
+                const color = CHANNEL_COLORS[channelId];
+                
+                // Define the vertical plotting area for this channel segment
+                const topY = channelIndex * segmentHeight;
+                const centerSegmentY = topY + (segmentHeight / 2);
+
+                // --- Draw Segment Baseline ---
+                ctx.strokeStyle = '#475569'; // Slate-600
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 5]);
+                ctx.beginPath();
+                ctx.moveTo(0, centerSegmentY);
+                ctx.lineTo(width, centerSegmentY);
+                ctx.stroke();
+                
+                // Draw channel label inside the segment
+                ctx.fillStyle = color;
+                ctx.fillText(channelId, 10, topY + 15);
+                ctx.setLineDash([]); // Reset line dash
+
+                // --- Draw Signal ---
+
+                ctx.beginPath();
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 2;
+                
+                // Calculate pixel position for a given voltage
+                const getCanvasY = (voltage) => {
+                    // Normalize voltage (0 to 1) relative to the fixed V_RANGE
+                    const normalizedV = (voltage - V_MIN) / V_RANGE; 
+                    
+                    // Scale the signal vertically within its segment
+                    // Use 80% of segmentHeight for the signal, centered on segment
+                    const signalRange = segmentHeight * 0.8;
+                    const signalOffset = segmentHeight * 0.1; // 10% padding top/bottom
+
+                    // Invert Y (1 - normalizedV) and scale to signal range
+                    const yInSegment = topY + signalOffset + (1 - normalizedV) * signalRange;
+                    
+                    return yInSegment;
+                }
+
+                // Draw the line graph
+                buffer.forEach((point, index) => {
+                    // X position across the full canvas width
+                    const x = (index / (DISPLAY_POINTS - 1)) * width;
+                    const y = getCanvasY(point.Voltage);
+
+                    if (index === 0) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                });
+
+                ctx.stroke();
+
+                channelIndex++;
+            });
         }
 
         // Start the signal acquisition loop
