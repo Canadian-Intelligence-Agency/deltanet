@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>δ.net Prototype: Neural Signal Stream</title>
+    <title>δ.net Prototype: Neural Signal Stream (Self-Contained)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         /* Custom styles for the visualization container */
@@ -21,7 +21,7 @@
     <div class="max-w-4xl mx-auto space-y-6">
         <header class="text-center py-4 border-b border-indigo-500/50">
             <h1 class="text-3xl font-extrabold text-indigo-400">δ.net: Multi-Channel Protocol Stream</h1>
-            <p class="text-sm text-gray-400 mt-1">Visualizing simulated 10 Hz Alpha, 4 Hz Theta, and Gamma wave data from the Go API.</p>
+            <p class="text-sm text-gray-400 mt-1">Simulated EEG Data (Wasm/In-Browser Model) - No external API required.</p>
         </header>
 
         <!-- Status and Metrics Panel -->
@@ -33,7 +33,6 @@
                 <span id="channel-count-display" class="text-gray-400 bg-gray-700 px-2 py-1 rounded-md">Channels: 0</span>
                 <span id="ts-display" class="text-gray-400">TS: 0 ms</span>
                 <span id="freq-display" class="text-yellow-400 font-mono">SPS: 0</span>
-                <span id="latency-display" class="text-gray-400">Latency: 0 ms</span>
             </div>
         </div>
 
@@ -53,8 +52,8 @@
 
     <script>
         // --- Configuration ---
-        const API_URL = "http://localhost:8080/api/v1/signal"; // Assuming Go server will now return multi-channel data
-        // Interval for fetching new data (simulating a stream)
+        // Removed API_URL and latency tracking as the app is now self-contained.
+        // Interval for generating new data (simulating the data packet arrival)
         const FETCH_INTERVAL_MS = 200; 
         // Number of data points to display in the window (e.g., 5 seconds at 250 SPS)
         const DISPLAY_POINTS = 1250; 
@@ -75,13 +74,12 @@
         // --- State Variables ---
         // Stores data: { "Fp1": [{t:..., v:...}, ...], "O1": [...] }
         let channelBuffers = {}; 
-        let lastTimestamp = 0; // For SPS calculation
+        let timeIndex = 0; // Represents time in seconds for sine wave generation
         
         // DOM Elements
         const statusDisplay = document.getElementById('status-display');
         const tsDisplay = document.getElementById('ts-display');
         const freqDisplay = document.getElementById('freq-display');
-        const latencyDisplay = document.getElementById('latency-display');
         const channelCountDisplay = document.getElementById('channel-count-display');
         const channelStatusList = document.getElementById('channel-status-list');
         
@@ -99,42 +97,54 @@
         window.addEventListener('resize', resizeCanvas);
         resizeCanvas();
 
-        // --- Data Fetching and Protocol Implementation ---
-        
-        // Helper function for exponential backoff retry logic
-        const fetchWithRetry = async (url, attempts = 5) => {
-            for (let i = 0; i < attempts; i++) {
-                try {
-                    const startTime = performance.now();
-                    const response = await fetch(url);
-                    const endTime = performance.now();
-                    
-                    if (!response.ok) {
-                        throw new Error(`HTTP error! status: ${response.status}`);
-                    }
-                    
-                    const data = await response.json();
-                    
-                    // Update latency metric
-                    latencyDisplay.textContent = `Latency: ${Math.round(endTime - startTime)} ms`;
-                    
-                    return data;
-                } catch (error) {
-                    if (i < attempts - 1) {
-                        const delay = Math.pow(2, i) * 1000;
-                        console.warn(`Fetch failed. Retrying in ${delay}ms... (${error.message})`);
-                        statusDisplay.textContent = `STATUS: Retrying in ${delay/1000}s...`;
-                        await new Promise(res => setTimeout(res, delay));
-                    } else {
-                        throw error;
-                    }
-                }
+        // --- Data Generation (Go Wasm Replacement) ---
+
+        /**
+         * Simulates a burst of multi-channel EEG data.
+         * @param {number} numPoints The number of samples to generate.
+         * @returns {Array<{channelId: string, points: Array<{t: number, v: number}>}>}
+         */
+        function generateSimulatedEEGData(numPoints) {
+            // Simulation Constants
+            const samplingRate = 250.0;  // Samples per second (SPS)
+            const timeStep = 1.0 / samplingRate;
+            const initialTimestampMs = performance.now(); // Base timestamp for this batch
+
+            const data = [
+                { channelId: "Fp1", points: [] },
+                { channelId: "O1", points: [] },
+                { channelId: "T3", points: [] },
+            ];
+
+            for (let i = 0; i < numPoints; i++) {
+                const currentSimTime = timeIndex;
+                const currentTimeMs = initialTimestampMs + (i * 1000 / samplingRate);
+
+                // Fp1 (Alpha + Low Frequency Component)
+                const v_fp1 = 50 * Math.sin(2 * Math.PI * 10.0 * currentSimTime) + // 10 Hz Alpha
+                              20 * Math.sin(2 * Math.PI * 2.0 * currentSimTime) +   // 2 Hz Slow Wave/Drift
+                              50.0 + (Math.random() * 10 - 5);                     // DC Offset + Random Noise 
+
+                // O1 (Theta + Visual Artifacts)
+                const v_o1 = 30 * Math.sin(2 * Math.PI * 4.0 * currentSimTime) +  // 4 Hz Theta Rhythm
+                             40.0 + (Math.random() * 8 - 4);                      // DC Offset + Random Noise
+
+                // T3 (Gamma Burst - High Frequency/Low Amplitude)
+                const v_t3 = 10 * Math.sin(2 * Math.PI * 30.0 * currentSimTime) + // 30 Hz Gamma Rhythm
+                             20.0 + (Math.random() * 15 - 7.5);                    // DC Offset + Higher Noise
+
+                data[0].points.push({ t: Math.round(currentTimeMs), v: Math.max(0, v_fp1) });
+                data[1].points.push({ t: Math.round(currentTimeMs), v: Math.max(0, v_o1) });
+                data[2].points.push({ t: Math.round(currentTimeMs), v: Math.max(0, v_t3) });
+
+                timeIndex += timeStep;
             }
-        };
+
+            return data;
+        }
 
         /**
          * Calculates the Samples Per Second (SPS) based on the latest data packet.
-         * Assumes the first channel in the buffer is representative.
          */
         function calculateSPS(channelData) {
             if (Object.keys(channelData).length === 0) return 0;
@@ -159,49 +169,21 @@
         }
         
         /**
-         * Processes incoming multi-channel data and updates buffers.
-         * Note: The Go server needs to be updated to return this structure.
-         * Expected format: [{ channelId: "Fp1", points: [{t:..., v:...}, ...] }, ...]
+         * Generates and processes multi-channel data.
          */
-        async function fetchSignalData() {
+        async function generateAndProcessData() {
             try {
-                // Fetch the new data array (expected multi-channel payload)
-                // If the Go server is still returning a single array of points, 
-                // this code will wrap it into a simulated multi-channel format for plotting.
-                let receivedData = await fetchWithRetry(API_URL);
-                
-                // --- Multi-Channel Adaptation/Simulation ---
+                // --- Data Generation ---
                 let processedChannels = {};
+                const pointsToGenerate = 50;
+                const newBatchData = generateSimulatedEEGData(pointsToGenerate);
                 
-                if (!Array.isArray(receivedData) || receivedData.length === 0) {
-                    throw new Error("Invalid data format received.");
-                }
-
-                if (receivedData[0].channelId === undefined) {
-                    // Simulate multi-channel data if the Go server returns only one channel (legacy)
-                    const simulatedPoints = receivedData; 
-                    
-                    // For visualization testing, we'll create simulated data for O1 and T3 based on Fp1
-                    const generateSimulatedChannel = (basePoints, offsetFactor, noiseFactor) => {
-                        return basePoints.map(p => ({
-                            t: p.t,
-                            // Apply a voltage offset and different noise/amplitude profile
-                            v: Math.max(0, p.v + offsetFactor + (Math.random() * noiseFactor)) 
-                        }));
-                    };
-
-                    processedChannels["Fp1"] = simulatedPoints;
-                    processedChannels["O1"] = generateSimulatedChannel(simulatedPoints, -10, 5);
-                    processedChannels["T3"] = generateSimulatedChannel(simulatedPoints, 20, 15);
-
-                } else {
-                    // Use the true multi-channel data structure from the updated Go server
-                    receivedData.forEach(channel => {
-                        if (CHANNEL_COLORS[channel.channelId]) {
-                             processedChannels[channel.channelId] = channel.points;
-                        }
-                    });
-                }
+                // --- Processing Logic ---
+                newBatchData.forEach(channel => {
+                    if (CHANNEL_COLORS[channel.channelId]) {
+                         processedChannels[channel.channelId] = channel.points;
+                    }
+                });
                 
                 if (Object.keys(processedChannels).length === 0) {
                      throw new Error("No recognized channel data found.");
@@ -209,7 +191,7 @@
                 
                 statusDisplay.classList.remove('text-red-400', 'text-yellow-400');
                 statusDisplay.classList.add('text-green-400');
-                statusDisplay.textContent = 'STATUS: Streaming';
+                statusDisplay.textContent = 'STATUS: Streaming (Self-Contained)';
 
                 let latestTS = 0;
                 let channelCount = 0;
@@ -246,10 +228,11 @@
                 drawSignal();
 
             } catch (error) {
-                console.error("Critical API error:", error);
+                // Since this is a local simulation, a catch here indicates a logic error, not a network failure.
+                console.error("Critical Simulation Error:", error);
                 statusDisplay.classList.remove('text-green-400');
                 statusDisplay.classList.add('text-red-400');
-                statusDisplay.textContent = 'STATUS: ERROR - API Down';
+                statusDisplay.textContent = 'STATUS: ERROR - Simulation Failure';
                 // Stop the interval on critical failure
                 clearInterval(dataFetcher);
             }
@@ -352,10 +335,10 @@
         }
 
         // Start the signal acquisition loop
-        const dataFetcher = setInterval(fetchSignalData, FETCH_INTERVAL_MS);
+        const dataFetcher = setInterval(generateAndProcessData, FETCH_INTERVAL_MS);
         
         // Initial fetch to populate the graph quickly
-        fetchSignalData(); 
+        generateAndProcessData(); 
 
     </script>
 </body>
