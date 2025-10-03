@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>δ.net Prototype: Neural Signal Stream (ADS Bridge)</title>
+    <title>δ.net Prototype: Neural Signal Stream (8-Channel ADC)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         /* Custom styles for the visualization container */
@@ -20,8 +20,8 @@
 
     <div class="max-w-4xl mx-auto space-y-6">
         <header class="text-center py-4 border-b border-indigo-500/50">
-            <h1 class="text-3xl font-extrabold text-indigo-400">δ.net: Multi-Channel Protocol Stream</h1>
-            <p class="text-sm text-gray-400 mt-1">Awaiting real-time EEG data feed from the ADS Hardware Bridge API.</p>
+            <h1 class="text-3xl font-extrabold text-indigo-400">δ.net: 8-Channel High-Speed Protocol Stream</h1>
+            <p class="text-sm text-gray-400 mt-1">Targeting the 24-bit, 30kSPS ADS via ESP32 Gateway.</p>
         </header>
 
         <!-- Status and Metrics Panel -->
@@ -53,9 +53,7 @@
 
     <script>
         // --- Configuration ---
-        // CRITICAL: This URL MUST point to your Go (or other language) server 
-        // that is actively reading the ADS chip (e.g., ADS1299) and exposing 
-        // the data as JSON via an HTTP endpoint.
+        // CRITICAL: This URL MUST point to your Go server running on localhost:8080
         const API_URL = "http://localhost:8080/api/v1/signal"; 
         
         // Interval for fetching new data (simulating the data packet arrival)
@@ -68,11 +66,16 @@
         const V_MAX = 120; // Set slightly above the 100 µV max for padding
         const V_RANGE = V_MAX - V_MIN;
         
-        // Channel Visualization Mapping (Mapping electrode positions to colors)
+        // Channel Visualization Mapping (Expanded for all 8 channels)
         const CHANNEL_COLORS = {
-            "Fp1": '#6366f1', // Indigo (Frontal)
-            "O1": '#22c55e',  // Green (Occipital)
-            "T3": '#f97316',  // Orange (Temporal)
+            "Fp1": '#f87171', // Red (Frontal)
+            "O1": '#34d399',  // Emerald (Occipital)
+            "T3": '#fb923c',  // Orange (Temporal Left)
+            "C3": '#38bdf8',  // Light Blue (Central Left)
+            "C4": '#f472b6',  // Pink (Central Right)
+            "Pz": '#a78bfa',  // Violet (Parietal Midline)
+            "Cz": '#fbbf24',  // Amber (Central Midline)
+            "M1": '#94a3b8',  // Slate (Mastoid/Reference)
         };
 
         // --- State Variables ---
@@ -108,11 +111,18 @@
             for (let i = 0; i < attempts; i++) {
                 try {
                     const startTime = performance.now();
+                    
+                    // Fetch data from the external Go server
                     const response = await fetch(url);
                     const endTime = performance.now();
                     
                     if (!response.ok) {
                         throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    
+                    if (response.status === 204) {
+                         // 204 No Content: Server is up but has no data yet (hardware pending)
+                         throw new Error("Bridge reported 204 No Content (Hardware pending).");
                     }
                     
                     const data = await response.json();
@@ -148,7 +158,8 @@
 
             if (points.length < 2) return 0;
 
-            const latestPoints = points.slice(-50); // Use the last 50 points for reliable calculation
+            // Use the last 50 points (the packet size) for reliable calculation
+            const latestPoints = points.slice(-50); 
             const startTime = latestPoints[0].t;
             const endTime = latestPoints[latestPoints.length - 1].t;
             const timeDeltaMs = endTime - startTime;
@@ -158,25 +169,18 @@
             const numSamples = latestPoints.length;
             const sps = (numSamples * 1000) / timeDeltaMs;
             
+            // Round to the nearest integer for display
             return Math.round(sps);
         }
         
         /**
-         * Fetches real-time multi-channel data from the ADS Bridge API.
-         * Expected format from API: 
-         * [{ channelId: "Fp1", points: [{t: number, v: number}, ...] }, ...]
+         * Fetches real-time multi-channel data from the Go ADS Bridge API.
          */
         async function fetchSignalData() {
             try {
-                // Fetch the real data payload from the ADS bridge
-                let receivedData = await fetchWithRetry(API_URL);
+                const receivedData = await fetchWithRetry(API_URL);
                 
                 if (!Array.isArray(receivedData) || receivedData.length === 0) {
-                    // Check if the API returned an unexpected single-channel simulation structure (from previous version)
-                    if (receivedData.length > 0 && receivedData[0].t !== undefined) {
-                        console.error("API Error: Bridge is sending flat data array. Expected multi-channel object array.");
-                        throw new Error("Invalid multi-channel structure.");
-                    }
                     throw new Error("Received empty or invalid data structure from API.");
                 }
 
@@ -184,8 +188,11 @@
                 let latestTS = 0;
                 let channelCount = 0;
                 
-                // Process the real-time multi-channel data
+                // Ensure only configured channels are processed
                 receivedData.forEach(channel => {
+                    // Normalize the point data keys to 'Voltage' for the drawing function
+                    channel.points.forEach(point => point.Voltage = point.v); 
+                    
                     const channelId = channel.channelId;
                     if (CHANNEL_COLORS[channelId]) {
                          processedChannels[channelId] = channel.points;
@@ -193,12 +200,13 @@
                 });
                 
                 if (Object.keys(processedChannels).length === 0) {
-                     throw new Error("API returned data for 0 configured channels (Fp1, O1, T3).");
+                     // Check if data was received but none of the 8 configured IDs were present
+                     throw new Error("API returned data for 0 configured channels.");
                 }
                 
                 statusDisplay.classList.remove('text-red-400', 'text-yellow-400');
                 statusDisplay.classList.add('text-green-400');
-                statusDisplay.textContent = 'STATUS: Streaming (ADS Live)';
+                statusDisplay.textContent = 'STATUS: Streaming (ADS Bridge Live)';
 
                 
                 for (const channelId in processedChannels) {
@@ -234,9 +242,12 @@
 
             } catch (error) {
                 console.error("Critical Network Error:", error);
-                statusDisplay.classList.remove('text-green-400', 'text-yellow-400');
-                statusDisplay.classList.add('text-red-400');
-                statusDisplay.textContent = 'STATUS: ERROR - Bridge Offline';
+                // Only change status to red error if it's not a temporary retry message
+                if (!statusDisplay.textContent.includes('Retrying')) {
+                    statusDisplay.classList.remove('text-green-400', 'text-yellow-400');
+                    statusDisplay.classList.add('text-red-400');
+                    statusDisplay.textContent = 'STATUS: ERROR - Bridge Offline';
+                }
             }
         }
 
